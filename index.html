@@ -231,7 +231,7 @@ header{height:48px;display:flex;align-items:center;padding:0 16px;gap:16px;
 .ail{font-size:.65rem;text-align:center;padding:6px 0;display:none;color:var(--purple);}
 .aie{color:var(--red);font-size:.63rem;padding:5px 7px;
   background:rgba(255,34,68,.08);border:1px solid rgba(255,34,68,.3);
-  border-radius:3px;display:none;}
+  border-radius:3px;display:none;white-space:pre-wrap;word-break:break-all;}
 .air{background:var(--panel);border:1px solid #2a1040;border-radius:4px;
   padding:8px 9px;display:none;max-height:230px;overflow-y:auto;
   font-size:.65rem;line-height:1.6;}
@@ -858,6 +858,72 @@ function captureWaveformImage(){
   });
 }
 
+// ══ ROBUST JSON EXTRACTOR ═══════════════════════════════════
+// FIX: Handles truncated responses, prose wrapping, and markdown fences
+function extractJSON(raw) {
+  // 1. Strip markdown code fences (```json ... ``` or ``` ... ```)
+  let text = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+  // 2. Try direct parse first (best case — clean response)
+  try { return JSON.parse(text); } catch (_) {}
+
+  // 3. Extract the first complete {...} block using a bracket-counter
+  //    This handles prose before/after the JSON object
+  const start = text.indexOf('{');
+  if (start !== -1) {
+    let depth = 0, inStr = false, escape = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (escape) { escape = false; continue; }
+      if (ch === '\\' && inStr) { escape = true; continue; }
+      if (ch === '"') { inStr = !inStr; continue; }
+      if (!inStr) {
+        if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            const candidate = text.slice(start, i + 1);
+            try { return JSON.parse(candidate); } catch (_) {}
+            break; // Found the closing brace but still invalid — fall through
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Last resort: try to salvage a truncated JSON by closing open structures.
+  //    Count unclosed braces/brackets and append them.
+  const startIdx = text.indexOf('{');
+  if (startIdx !== -1) {
+    let snippet = text.slice(startIdx);
+    // Remove any trailing incomplete key-value (e.g. ,"key":"incomplet)
+    snippet = snippet.replace(/,\s*"[^"]*"\s*:\s*"[^"]*$/, '');
+    snippet = snippet.replace(/,\s*"[^"]*"\s*:\s*$/, '');
+    snippet = snippet.replace(/,\s*"[^"]*"\s*$/, '');
+    // Close any open string
+    const quoteCount = (snippet.match(/(?<!\\)"/g) || []).length;
+    if (quoteCount % 2 !== 0) snippet += '"';
+    // Close open arrays then objects
+    const opens = { '{': '}', '[': ']' };
+    const stack = [];
+    let inS = false, esc = false;
+    for (const ch of snippet) {
+      if (esc) { esc = false; continue; }
+      if (ch === '\\' && inS) { esc = true; continue; }
+      if (ch === '"') { inS = !inS; continue; }
+      if (!inS) {
+        if (ch === '{' || ch === '[') stack.push(opens[ch]);
+        else if (ch === '}' || ch === ']') stack.pop();
+      }
+    }
+    snippet += stack.reverse().join('');
+    try { return JSON.parse(snippet); } catch (_) {}
+  }
+
+  // 5. Nothing worked — throw a descriptive error
+  throw new Error(`Could not parse Gemini response as JSON.\n\nRaw (first 300 chars):\n${raw.slice(0, 300)}`);
+}
+
 // ══ BUILD NUMBERS PROMPT ════════════════════════════════════
 function buildNumbersPrompt(d, fft){
   const m={
@@ -887,24 +953,27 @@ DIAGNOSE health:
 - THD>10%: distortion warning
 - PF<0.85: reactive load warning
 
-Reply ONLY valid JSON, no markdown:
+IMPORTANT: Reply with ONLY a raw JSON object. No markdown, no code fences, no explanation outside the JSON. Start your response with { and end with }.
+
+Required format:
 {"circuit_type":"...","confidence":90,"health":"Good","summary":"one sentence","details":"2-3 sentences with specific values","warnings":[]}
-health = exactly "Good" or "Warning" or "Fault"
+health must be exactly one of: "Good", "Warning", or "Fault"
 
 Data: ${JSON.stringify(m)}`;
 }
 
 // ══ GEMINI API CALLS ═════════════════════════════════════════
+// FIX: Raised maxOutputTokens from 500→1024 and 700→1024 to prevent truncation
 async function callGeminiText(key, prompt){
   const res=await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`,
     {method:'POST',headers:{'Content-Type':'application/json'},
      body:JSON.stringify({contents:[{parts:[{text:prompt}]}],
-       generationConfig:{temperature:0.1,maxOutputTokens:500}})}
+       generationConfig:{temperature:0.1,maxOutputTokens:1024}})}
   );
   if(!res.ok){const e=await res.json();throw new Error(e.error?.message||`HTTP ${res.status}`);}
   const data=await res.json();
-  return data.candidates[0].content.parts[0].text.trim().replace(/```json|```/g,'').trim();
+  return data.candidates[0].content.parts[0].text.trim();
 }
 
 async function callGeminiVision(key, prompt, imageBase64){
@@ -914,11 +983,11 @@ async function callGeminiVision(key, prompt, imageBase64){
      body:JSON.stringify({contents:[{parts:[
        {text:prompt},
        {inline_data:{mime_type:'image/png',data:imageBase64}}
-     ]}],generationConfig:{temperature:0.1,maxOutputTokens:700}})}
+     ]}],generationConfig:{temperature:0.1,maxOutputTokens:1024}})}
   );
   if(!res.ok){const e=await res.json();throw new Error(e.error?.message||`HTTP ${res.status}`);}
   const data=await res.json();
-  return data.candidates[0].content.parts[0].text.trim().replace(/```json|```/g,'').trim();
+  return data.candidates[0].content.parts[0].text.trim();
 }
 
 // ══ MAIN AI ENTRY POINT ══════════════════════════════════════
@@ -939,8 +1008,11 @@ async function runAI(useImage){
   const d=lastData;
   const fft=processFFT(d.voltage,d.current,1000/DT);
 
+  // FIX: rawJson is now declared outside try so catch block can reference it for debug info
+  let rawJson = '';
+
   try{
-    let rawJson, mode;
+    let mode;
     if(useImage){
       // Switch to voltage tab so canvas is fully rendered
       document.querySelectorAll('.cp').forEach(p=>p.classList.remove('show'));
@@ -968,9 +1040,11 @@ C) DIAGNOSE health:
 - THD>10%: distortion warning
 - PF<0.85: reactive load
 
-Reply ONLY valid JSON, no markdown:
+IMPORTANT: Reply with ONLY a raw JSON object. No markdown, no code fences, no explanation outside the JSON. Start your response with { and end with }.
+
+Required format:
 {"circuit_type":"...","confidence":90,"health":"Good","summary":"one sentence","details":"2-3 sentences with specific values","visual_observation":"2-3 sentences about the waveform image","warnings":[]}
-health = exactly "Good" or "Warning" or "Fault"
+health must be exactly one of: "Good", "Warning", or "Fault"
 
 Data: ${JSON.stringify({signal_type:d.signal_type,frequency_hz:+d.frequency.toFixed(2),
   vrms:+d.v.rms.toFixed(3),vpeak:+d.v.peak.toFixed(3),crest:+d.v.crest.toFixed(3),
@@ -981,9 +1055,14 @@ Data: ${JSON.stringify({signal_type:d.signal_type,frequency_hz:+d.frequency.toFi
       rawJson=await callGeminiText(key,buildNumbersPrompt(d,fft));
       mode='numbers';
     }
-    showAIResult(JSON.parse(rawJson),mode);
+
+    // FIX: Use robust extractJSON instead of bare JSON.parse
+    const parsed = extractJSON(rawJson);
+    showAIResult(parsed, mode);
+
   }catch(e){
-    showAIErr('Gemini Error: '+e.message);
+    // FIX: Show raw snippet in error panel for easy debugging
+    showAIErr(e.message);
   }finally{
     document.getElementById('aiBtn').disabled=false;
     document.getElementById('aiImgBtn').disabled=false;
