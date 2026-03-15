@@ -6,6 +6,9 @@ Built for **Electrothon 8.0** | NIT Hamirpur | First Year Engineering Student
 
 ---
 
+https://drive.google.com/file/d/1rVGG4GUArWKFOIuTq2kKLgNRNvUQqXf-/view?usp=sharing
+
+
 ## 🏆 MLH Google Cloud — Gemini API Challenge
 
 This project uses **Google Gemini 2.5 Flash API** as the core intelligence layer of a real hardware oscilloscope. Gemini is not a chatbot here — it is the diagnostic brain of the entire device.
